@@ -1,4 +1,4 @@
-# WindowsImagePdfOcrApp
+# WindowsOCREngine
 
 A small command-line and library tool that performs OCR on PDF pages and image files using Windows built-in OCR (Windows.Media.Ocr). The application renders PDF pages, preprocesses images (padding, inversion, scaling), and extracts text using the Windows OCR engine. The project is implemented in C# targeting .NET 8 and is designed to run on Windows (desktop) environments that support WinRT OCR APIs.
 
