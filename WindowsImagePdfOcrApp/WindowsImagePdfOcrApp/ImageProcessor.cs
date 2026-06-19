@@ -52,7 +52,7 @@ namespace WindowsImagePdfOcrApp
 
         private bool IsImageExtension(string path)
         {
-            string ext = Path.GetExtension(path)?.ToLowerInvariant();
+            string ext = Path.GetExtension(path).ToLowerInvariant();
             return ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
                    ext == ".bmp" || ext == ".tif" || ext == ".tiff" || ext == ".gif";
         }

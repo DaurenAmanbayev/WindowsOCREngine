@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Windows.Globalization;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
+using WindowsImagePdfOcrApp.PostProcessing;
 
 namespace WindowsImagePdfOcrApp
 {
@@ -16,8 +17,10 @@ namespace WindowsImagePdfOcrApp
     {
         private readonly OcrEngine _engine;
         private readonly bool _isSpaceJoiningLanguage;
+        private readonly TextPostProcessingPipeline _postProcessor;
+        private readonly PostProcessingContext _postContext;
 
-        public PowerOcrEngine(string? languageTag = null)
+        public PowerOcrEngine(string? languageTag = null, PostProcessingOptions? options = null)
         {
             // Initialization (Microsoft Original)
             if (string.IsNullOrEmpty(languageTag))
@@ -28,13 +31,18 @@ namespace WindowsImagePdfOcrApp
             if (!OcrEngine.IsLanguageSupported(selectedLanguage))
             {
                 var available = OcrEngine.AvailableRecognizerLanguages;
-                selectedLanguage = available.FirstOrDefault(l => l.LanguageTag.StartsWith(selectedLanguage.LanguageTag.Split('-')[0]))
-                                   ?? available.FirstOrDefault();
-                if (selectedLanguage == null) throw new InvalidOperationException("OCR языки не найдены.");
+                var fallback = available.FirstOrDefault(l => l.LanguageTag.StartsWith(selectedLanguage.LanguageTag.Split('-')[0]))
+                               ?? available.FirstOrDefault();
+                if (fallback == null) throw new InvalidOperationException("OCR языки не найдены.");
+                selectedLanguage = fallback;
             }
 
             _engine = OcrEngine.TryCreateFromLanguage(selectedLanguage);
             _isSpaceJoiningLanguage = IsLanguageSpaceJoining(selectedLanguage);
+
+            // Post-processing pipeline (runs after every page/image, before text leaves the engine).
+            _postContext = new PostProcessingContext(selectedLanguage.LanguageTag, _isSpaceJoiningLanguage, options ?? new PostProcessingOptions());
+            _postProcessor = TextPostProcessingPipeline.CreateDefault(_postContext.Options);
         }
 
         public async Task<string> ExtractTextAsync(string imagePath)
@@ -50,31 +58,68 @@ namespace WindowsImagePdfOcrApp
             // We must add a border
             using var paddedBmp = PadImage(inputBmp);
 
-            // 2. INVERT (TUNING #1)
-            // Critically important for Dark Mode.
-            // Turn "White on Gray" into "Black on White".
-            // This improves recognition of small fonts by 40-50%.
-            using var invertedBmp = InvertColors(paddedBmp);
+            // 2. INVERT (TUNING #1) — ONLY for dark-background images (e.g. dark-mode screenshots),
+            // where inversion turns "white on gray" into "black on white" and boosts small light-on-dark
+            // fonts. A normal black-on-white scan must NOT be inverted (that yields white-on-black, which
+            // the OCR engine reads worse — it expects dark text on a light background). Auto-detect by
+            // average luminance so both scenarios work.
+            // Decide on the raw input (the white padding border would bias the average toward "light").
+            using var preparedBmp = IsDarkBackground(inputBmp) ? InvertColors(paddedBmp) : new Bitmap(paddedBmp);
 
             // 3. Scale 2.0 (TUNING #2)
             // Was 1.5 -> Now 2.0.
             // Fixes the "Лдти" (Идти) mistake.
+            // BUT only upscale images that are still small. When the page was already rendered at a high
+            // DPI (e.g. PdfProcessor renders PDFs at 300 DPI), a second ×2 double-upscales and blurs thin
+            // Cyrillic strokes (телекоммуникаций -> телекоммунржащй). So skip ×2 once the image is large.
+            const int alreadyHighResPx = 1600;
             double scaleFactor = 2.0;
 
-            bool performScale = true;
-            if (invertedBmp.Width * scaleFactor > OcrEngine.MaxImageDimension ||
-                invertedBmp.Height * scaleFactor > OcrEngine.MaxImageDimension)
+            bool performScale = Math.Max(preparedBmp.Width, preparedBmp.Height) < alreadyHighResPx;
+            if (performScale &&
+                (preparedBmp.Width * scaleFactor > OcrEngine.MaxImageDimension ||
+                 preparedBmp.Height * scaleFactor > OcrEngine.MaxImageDimension))
             {
                 performScale = false;
             }
 
-            using var finalBmp = performScale ? ScaleBitmapUniform(invertedBmp, scaleFactor) : new Bitmap(invertedBmp);
+            using var finalBmp = performScale ? ScaleBitmapUniform(preparedBmp, scaleFactor) : new Bitmap(preparedBmp);
 
             // 4. Recognition
             using var softwareBitmap = await ConvertToSoftwareBitmap(finalBmp);
             var result = await _engine.RecognizeAsync(softwareBitmap);
 
-            return ProcessOcrResult(result);
+            // 5. Assemble raw text, then run the universal post-processing pipeline.
+            return _postProcessor.Process(ProcessOcrResult(result), _postContext);
+        }
+
+        // --- Helper: detect a dark background (i.e. the image needs inversion) ---
+        private static bool IsDarkBackground(Bitmap bmp)
+        {
+            try
+            {
+                // Average luminance over a coarse grid (fast even on large high-DPI bitmaps). A normal
+                // black-on-white document averages bright; a dark-mode screenshot averages dark.
+                int stepX = Math.Max(1, bmp.Width / 100);
+                int stepY = Math.Max(1, bmp.Height / 100);
+                double sum = 0;
+                int count = 0;
+                for (int y = 0; y < bmp.Height; y += stepY)
+                {
+                    for (int x = 0; x < bmp.Width; x += stepX)
+                    {
+                        Color c = bmp.GetPixel(x, y);
+                        sum += 0.299 * c.R + 0.587 * c.G + 0.114 * c.B;
+                        count++;
+                    }
+                }
+                return count > 0 && (sum / count) < 128.0;
+            }
+            catch
+            {
+                // Unsupported (e.g. indexed) pixel format: assume a light background and don't invert.
+                return false;
+            }
         }
 
         // --- Helper: Invert Colors (Simple math) ---
