@@ -6,6 +6,7 @@ using Windows.Storage.Streams;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using WindowsImagePdfOcrApp.PostProcessing;
 
 namespace WindowsImagePdfOcrApp
 {
@@ -16,9 +17,62 @@ namespace WindowsImagePdfOcrApp
             // 1. Configure encoding for correct display of Cyrillic characters in the console
             Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-            // 2. Get file path (from arguments or hardcoded for testing)
-            // If running from console: OcrTool.exe "C:\Path\To\File.pdf"
-            string inputPath = args.Length > 0 ? args[0] : @"C:\Test\scan.pdf";
+            // 2. Parse arguments: optional flags + a positional file path.
+            //    Flags (aliases: --x, -x=<v>, --x=<v>):
+            //      -lang <tag>        recognition language override (default auto kk -> ru -> en)
+            //      -pagelabel <text>  PDF page separator word (default by language: Страница/Бет/Page)
+            //      -dpi <n>           PDF render DPI (default 150)
+            //    Examples: OcrTool.exe -lang ru-RU -dpi 300 "C:\Path\File.pdf"
+            string? inputPath = null;
+            string? langArg = null;
+            string? pageLabelArg = null;
+            int? dpiArg = null;
+            for (int i = 0; i < args.Length; i++)
+            {
+                string arg = args[i];
+                if (arg.Equals("-lang", StringComparison.OrdinalIgnoreCase) || arg.Equals("--lang", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (i + 1 < args.Length) langArg = args[++i];
+                    else Console.Error.WriteLine("[ERROR] -lang requires a language tag, e.g. -lang ru-RU");
+                }
+                else if (arg.StartsWith("-lang=", StringComparison.OrdinalIgnoreCase))
+                {
+                    langArg = arg.Substring("-lang=".Length);
+                }
+                else if (arg.StartsWith("--lang=", StringComparison.OrdinalIgnoreCase))
+                {
+                    langArg = arg.Substring("--lang=".Length);
+                }
+                else if (arg.Equals("-pagelabel", StringComparison.OrdinalIgnoreCase) || arg.Equals("--pagelabel", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (i + 1 < args.Length) pageLabelArg = args[++i];
+                    else Console.Error.WriteLine("[ERROR] -pagelabel requires a value, e.g. -pagelabel Страница");
+                }
+                else if (arg.StartsWith("-pagelabel=", StringComparison.OrdinalIgnoreCase))
+                {
+                    pageLabelArg = arg.Substring("-pagelabel=".Length);
+                }
+                else if (arg.StartsWith("--pagelabel=", StringComparison.OrdinalIgnoreCase))
+                {
+                    pageLabelArg = arg.Substring("--pagelabel=".Length);
+                }
+                else if (arg.Equals("-dpi", StringComparison.OrdinalIgnoreCase) || arg.Equals("--dpi", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int dpiVal)) { dpiArg = dpiVal; i++; }
+                    else Console.Error.WriteLine("[ERROR] -dpi requires an integer, e.g. -dpi 300");
+                }
+                else if (arg.StartsWith("-dpi=", StringComparison.OrdinalIgnoreCase) || arg.StartsWith("--dpi=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string dpiText = arg.Substring(arg.IndexOf('=') + 1);
+                    if (int.TryParse(dpiText, out int dpiVal)) dpiArg = dpiVal;
+                    else Console.Error.WriteLine("[ERROR] -dpi requires an integer, e.g. -dpi=300");
+                }
+                else if (inputPath == null)
+                {
+                    inputPath = arg;
+                }
+            }
+            inputPath ??= @"C:\Test\scan.pdf";
 
             Console.WriteLine($"=== Starting OCR Tool ===");
             Console.WriteLine($"Input file: {inputPath}");
@@ -26,15 +80,24 @@ namespace WindowsImagePdfOcrApp
             try
             {
                 // 3. Initialize engine core (V12 - Invert + Scale 2.0)
-                // Explicitly specify Russian language; the engine will pick up English as well
-                var engine = new PowerOcrEngine("ru-RU");
+                // Use -lang if supplied; otherwise auto-pick for trilingual KZ content (kk → ru → en).
+                var options = new PostProcessingOptions();
+                string language = LanguageSelector.PickBest(langArg);
+                string pageLabel = pageLabelArg ?? PageLabelForLanguage(language);
+                // Default 150 DPI: on A4 document scans it lands just above the ×2-skip threshold
+                // (~1754px) for a clean native render, and the OCR engine reads body Cyrillic best at
+                // this size. Higher DPI enlarges glyphs and blurs thin strokes (и/н/ш/щ), hurting prose
+                // without improving the already-good technical data. Override per run with -dpi.
+                int dpi = Math.Clamp(dpiArg ?? 150, 72, 600);
+                Console.WriteLine($"OCR language: {language} | page label: {pageLabel} | render DPI: {dpi}");
+                var engine = new PowerOcrEngine(language, options);
 
                 // 4. Initialize processors
-                var pdfProcessor = new PdfProcessor(engine);
+                var pdfProcessor = new PdfProcessor(engine, pageLabel, dpi);
                 var imageProcessor = new ImageProcessor(engine);
 
                 // 5. Determine file type and route processing
-                string extension = Path.GetExtension(inputPath)?.ToLowerInvariant();
+                string extension = Path.GetExtension(inputPath).ToLowerInvariant();
 
                 if (extension == ".pdf")
                 {
@@ -108,6 +171,12 @@ namespace WindowsImagePdfOcrApp
             Console.WriteLine($"\n[SUCCESS] Full text saved to file: {outputPath}");
         }
 
-
+        // Localized default page-separator label, keyed off the selected OCR language.
+        private static string PageLabelForLanguage(string tag) => tag.Split('-')[0].ToLowerInvariant() switch
+        {
+            "ru" => "Страница",
+            "kk" => "Бет",
+            _ => "Page",
+        };
     }
 }

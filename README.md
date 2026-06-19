@@ -41,10 +41,22 @@ dotnet build -c Release
 Usage (console):
 
 
-WindowsImagePdfOcrApp.exe "C:\path\to\file.pdf"
+WindowsImagePdfOcrApp.exe [-lang <tag>] [-pagelabel <text>] [-dpi <n>] "C:\path\to\file.pdf"
 
 
-If no path is provided, the app uses a test path configured in `Program.cs`.
+If no path is provided, the app uses a test path configured in `Program.cs`. All flags accept the forms
+`-flag <value>`, `--flag <value>`, `-flag=<value>` and `--flag=<value>`, in any position.
+
+- **`-lang <tag>`** — recognition-language override. Without it, the app auto-selects the first installed
+  recognizer in priority order **kk → ru → en**. Matched by primary subtag, so `-lang ru`, `-lang RU`
+  and `-lang ru-RU` are equivalent. If the requested language is not installed, a warning is printed and
+  the app falls back to auto-selection.
+- **`-pagelabel <text>`** — word used in the PDF page separator `--- <text> N ---`. Default depends on
+  the OCR language: `Страница` (ru), `Бет` (kk), `Page` (otherwise).
+- **`-dpi <n>`** — PDF render resolution (default **150**, clamped to 72–600). 150 is the sweet spot for
+  typical A4 document scans (clean native render, best body-text recognition). Very high DPI enlarges
+  glyphs and can actually *hurt* prose recognition, so raise it only for unusually small fonts. Affects
+  PDF input only.
 
 ### Examples:
 
@@ -60,11 +72,25 @@ If no path is provided, the app uses a test path configured in `Program.cs`.
     WindowsImagePdfOcrApp.exe "C:\Images\scan.png"
     ```
 
+- Force Kazakh recognition:
+
+    ```bash
+    WindowsImagePdfOcrApp.exe -lang kk-KZ "C:\Scans\document.pdf"
+    ```
+
+- Russian scan at 400 DPI with a custom page label:
+
+    ```bash
+    WindowsImagePdfOcrApp.exe -lang ru-RU -dpi 400 -pagelabel "Лист" "C:\Scans\document.pdf"
+    ```
+
 The extracted text will be saved to `file.pdf.txt` or `scan.png.txt` next to the source file.
 
 ## Configuration
 
-- **Language:** The engine can be initialized with a language tag (e.g. `ru-RU`). If the requested language is not available, the engine falls back to an available recognizer language.
+- **Language:** By default the app auto-selects the OCR recognizer in priority order **kk → ru → en** (suited to trilingual Kazakh/Russian/Latin content). Override it from the command line with `-lang <tag>` (e.g. `-lang kk-KZ`). If the requested/auto language is not installed, the engine falls back to an available recognizer.
+- **Page separator:** Multi-page PDFs are split with `--- <label> N ---`. The label defaults to the OCR language (`Страница`/`Бет`/`Page`) and can be overridden with `-pagelabel <text>`.
+- **Render DPI:** PDF pages are rasterized at `-dpi <n>` (default 150) before OCR. 150 gives the best balance on A4 document scans; higher values enlarge text and can degrade prose recognition with the Windows OCR engine, so only raise it for very small fonts. Configurable per run; the rasterization code lives in `PdfProcessor.cs`.
 - **Scaling:** The engine applies a scaling factor (default 2.0) before recognition. You can change scaling or pre-processing in `PowerOcrEngine.cs`.
 
 ## Project layout
